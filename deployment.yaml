@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-microservice-iot-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telegram-microservice-iot-bot
+  template:
+    metadata:
+      labels:
+        app: telegram-microservice-iot-bot
+    spec:
+      containers:
+        - name: telegram-microservice-iot-bot
+          image: YOURDOCKERIMAGES # 用你的 Docker 映像名稱
+          ports:
+            - containerPort: 5000
+          env:
+            - name: TELEGRAM_BOT_TOKEN
+              value: "ENTERYOURTELEGRAMBOTTOKENHERE"  # 直接在此處設置 Bot Token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: telegram-microservice-iot-bot
+spec:
+  selector:
+    app: telegram-microservice-iot-bot
+  ports:
+  - protocol: TCP
+    port: 80         # ClusterIP 可訪問的端口
+    targetPort: 5000 # Pod 容器內的應用端口
+  type: ClusterIP
+
+
