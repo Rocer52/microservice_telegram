@@ -6,14 +6,15 @@ import logging
 import IoTQbroker
 import IMQbroker
 import threading
+import time
 
-# 設置日誌
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# 儲存聊天 ID
+# Store chat IDs
 chat_ids = set()
 
 def add_chat_id(chat_id: str):
@@ -89,8 +90,8 @@ def webhook():
 
         add_chat_id(user_id)
 
-        # 直接調用 IOTQbroker 解析消息並發送到 IOTQueue
-        device = IoTQbroker.Device("LivingRoomLight", platform="line")  # 傳遞 platform 參數
+        # Directly call IoTQbroker to parse message and send to IOTQueue
+        device = IoTQbroker.Device("LivingRoomLight", device_id=config.DEVICE_ID, platform="line", chat_id=user_id)
         iot_result = IoTQbroker.IoTParse_Message(message_text, device, user_id, "line")
         if not iot_result["success"]:
             send_message(user_id, "Please enter a valid command")
@@ -126,14 +127,14 @@ def send_all_message_route():
         return {"ok": False, "message": "Missing message"}, 400
 
     success = send_all_message(message)
-    return {"ok": success, "message": "All messages sent" if success else "Failed to send some messages"}, 200 if success else 500
+    return {"ok": success, "message": "All messages sent" if success else "Some messages failed to send"}, 200 if success else 500
 
 if __name__ == "__main__":
-    # 啟動 IMQbroker 消費 IMQueue 的線程
+    # Start IMQbroker to consume IMQueue in a thread
     imqbroker_thread = threading.Thread(target=IMQbroker.consume_im_queue)
     imqbroker_thread.daemon = True
     imqbroker_thread.start()
     logger.info("IMQbroker started in a separate thread")
 
-    # 啟動 Flask 服務
-    app.run(host="0.0.0.0", port=5001)
+    # Start Flask service
+    app.run(host="0.0.0.0", port=config.LINE_API_PORT)

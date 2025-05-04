@@ -6,98 +6,114 @@ import config
 import time
 import uuid
 
-# 設置日誌，記錄程式執行資訊
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 類：模擬 IoT 設備，負責發送命令到 IOTQueue
+# Global client pool to reuse MQTT clients by chat_id
+client_pool = {}
+
+# Class: Simulate IoT device, send commands to IOTQueue
 class Device:
-    def __init__(self, name: str, broker_host: str = "localhost", broker_port: int = 1883, platform: str = "unknown"):
-        self.name = name  # 設備名稱
-        self.message_api = MessageAPI(broker_host, broker_port, platform)  # 創建 MessageAPI 實例
+    def __init__(self, name: str, device_id: str = config.DEVICE_ID, platform: str = "unknown", chat_id: str = None):
+        self.name = name  # Device name
+        self.device_id = device_id  # Device ID
+        self.chat_id = chat_id  # Chat ID for client reuse
+        self.platform = platform  # Platform (telegram or line)
+        self.message_api = MessageAPI(config.IOTQUEUE_HOST, config.IOTQUEUE_PORT, platform, device_id, chat_id)  # Create MessageAPI instance
 
-    # 函數：啟用設備
+    # Function: Enable device
     def enable(self, chat_id: str = None, platform: str = "telegram") -> bool:
-        return self.message_api.send_message("light/command", {"command": "on", "chat_id": chat_id, "platform": platform})
+        return self.message_api.send_message(f"light/esp_32/{self.device_id}/command", {"command": "on", "chat_id": chat_id, "platform": platform})
 
-    # 函數：禁用設備
+    # Function: Disable device
     def disable(self, chat_id: str = None, platform: str = "telegram") -> bool:
-        return self.message_api.send_message("light/command", {"command": "off", "chat_id": chat_id, "platform": platform})
+        return self.message_api.send_message(f"light/esp_32/{self.device_id}/command", {"command": "off", "chat_id": chat_id, "platform": platform})
 
-    # 函數：獲取設備狀態
+    # Function: Get device status
     def get_status(self, chat_id: str = None, platform: str = "telegram") -> bool:
-        return self.message_api.send_message("light/command", {"command": "get_status", "chat_id": chat_id, "platform": platform})
+        return self.message_api.send_message(f"light/esp_32/{self.device_id}/command", {"command": "get_status", "chat_id": chat_id, "platform": platform})
 
-# 類：處理 MQTT 消息發送，連接到 IOTQueue
+# Class: Handle MQTT message sending, connect to IOTQueue
 class MessageAPI:
-    def __init__(self, broker_host: str, broker_port: int, platform: str):
-        # 動態生成唯一的 client_id，避免衝突
-        self.client_id = f"iotq_broker_{platform}_{str(uuid.uuid4())[:8]}"
-        self.broker_host = broker_host  # MQTT 代理主機
-        self.broker_port = broker_port  # MQTT 代理端口
-        self.client = mqtt.Client(client_id=self.client_id)  # 創建 MQTT 客戶端
-        self.client.on_connect = self.on_connect  # 設置連線回調
-        self.client.on_disconnect = self.on_disconnect  # 設置斷線回調
-        self.client.reconnect_delay_set(min_delay=1, max_delay=120)  # 設置自動重連參數
-        self.connect()  # 連接到 MQTT 代理
+    def __init__(self, broker_host: str, broker_port: int, platform: str, device_id: str, chat_id: str):
+        self.broker_host = broker_host  # MQTT broker host
+        self.broker_port = broker_port  # MQTT broker port
+        self.device_id = device_id  # Device ID
+        self.platform = platform  # Platform
+        self.chat_id = chat_id or "default"  # Use chat_id or default for client key
 
-    # 回調函數：處理連線成功
+        # Reuse or create MQTT client
+        if self.chat_id in client_pool:
+            self.client = client_pool[self.chat_id]
+            logger.info(f"Reusing MQTT client for chat_id={self.chat_id}")
+        else:
+            client_id = f"iotq_broker_{platform}_{self.chat_id}_{str(uuid.uuid4())[:8]}"
+            self.client = mqtt.Client(client_id=client_id)  # Create new MQTT client
+            self.client.on_connect = self.on_connect  # Set connect callback
+            self.client.on_disconnect = self.on_disconnect  # Set disconnect callback
+            self.client.reconnect_delay_set(min_delay=1, max_delay=120)  # Set auto-reconnect parameters
+            client_pool[self.chat_id] = self.client
+            logger.info(f"Created new MQTT client for chat_id={self.chat_id}, client_id={client_id}")
+            self.connect()  # Connect to MQTT broker
+
+    # Callback: Handle successful connection
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
-            logger.info(f"客戶端 {self.client_id} 已連接到 IOTQueue 代理")
+            logger.info(f"Client {client._client_id} connected to IOTQueue broker")
         else:
-            logger.error(f"客戶端 {self.client_id} 連接到 IOTQueue 代理失敗，返回碼: {rc}")
+            logger.error(f"Client {client._client_id} failed to connect to IOTQueue broker, return code: {rc}")
 
-    # 回調函數：處理斷線事件
+    # Callback: Handle disconnection
     def on_disconnect(self, client, userdata, rc):
-        logger.warning(f"客戶端 {self.client_id} 與 IOTQueue 代理斷開連線，嘗試重連...")
+        logger.warning(f"Client {client._client_id} disconnected from IOTQueue broker, attempting to reconnect...")
 
-    # 函數：連接到 MQTT 代理
+    # Function: Connect to MQTT broker
     def connect(self):
         try:
-            self.client.connect(self.broker_host, self.broker_port)  # 連接到 MQTT 代理（使用預設 Keep Alive 60 秒）
-            self.client.loop_start()  # 啟動 MQTT 客戶端迴圈
+            self.client.connect(self.broker_host, self.broker_port)  # Connect to MQTT broker
+            self.client.loop_start()  # Start MQTT client loop
         except Exception as e:
-            logger.error(f"客戶端 {self.client_id} 連接到 MQTT 代理失敗: {e}")
-            time.sleep(5)  # 等待 5 秒後重試
+            logger.error(f"Client {self.client._client_id} failed to connect to MQTT broker: {e}")
+            time.sleep(5)  # Wait 5 seconds before retry
             self.connect()
 
-    # 函數：發送消息到指定主題
+    # Function: Send message to specified topic
     def send_message(self, topic: str, message: dict) -> bool:
         try:
-            self.client.publish(topic, json.dumps(message))  # 發送消息
-            logger.info(f"IOTQueue 消息發送成功: topic={topic}, message={json.dumps(message)}")
+            self.client.publish(topic, json.dumps(message))  # Send message
+            logger.info(f"IOTQueue message sent successfully: topic={topic}, message={json.dumps(message)}")
             return True
         except Exception as e:
-            logger.error(f"發送 IOTQueue 消息失敗: {e}")
+            logger.error(f"Failed to send IOTQueue message: {e}")
             return False
 
-    # 函數：停止 MQTT 客戶端
+    # Function: Stop MQTT client
     def stop(self):
-        self.client.loop_stop()  # 停止迴圈
-        self.client.disconnect()  # 斷開連線
+        self.client.loop_stop()  # Stop loop
+        self.client.disconnect()  # Disconnect
 
-# 函數：解析用戶消息並轉換為 IoT 命令
+# Function: Parse user message and convert to IoT command
 def IoTParse_Message(message_text: str, device: Device, chat_id: str, platform: str = "telegram") -> dict:
-    message_text = message_text.lower().strip()  # 轉為小寫並去除空白
-    logger.info(f"正在解析 IoT 消息: {message_text}")
+    message_text = message_text.lower().strip()  # Convert to lowercase and trim
+    logger.info(f"Parsing IoT message: {message_text}")
 
-    # 匹配啟用命令
+    # Match enable command
     if re.match(r"^/enable(\s+.*)?$", message_text) or re.match(r"^(turn on the light|turn on)(\s+.*)?$", message_text):
         if device.enable(chat_id, platform):
             return {"success": True, "action": "Enable"}
         else:
-            return {"success": False, "message": "無法啟用設備"}
-    # 匹配禁用命令
+            return {"success": False, "message": "Failed to enable device"}
+    # Match disable command
     elif re.match(r"^/disable(\s+.*)?$", message_text) or re.match(r"^(turn off the light|turn off)(\s+.*)?$", message_text):
         if device.disable(chat_id, platform):
             return {"success": True, "action": "Disable"}
         else:
-            return {"success": False, "message": "無法禁用設備"}
-    # 匹配獲取狀態命令
+            return {"success": False, "message": "Failed to disable device"}
+    # Match get status command
     elif re.match(r"^/status(\s+.*)?$", message_text) or re.match(r"^(get status)(\s+.*)?$", message_text):
         if device.get_status(chat_id, platform):
             return {"success": True, "action": "GetStatus"}
         else:
-            return {"success": False, "message": "無法獲取設備狀態"}
-    return {"success": False, "message": "無效的命令"}
+            return {"success": False, "message": "Failed to get device status"}
+    return {"success": False, "message": "Invalid command"}
