@@ -49,13 +49,14 @@ def consume_im_queue():
                 chat_id = message.get("chat_id")  # Get chat ID
                 status = message["device_status"]  # Get device status
                 platform = message.get("platform", "telegram")  # Get platform
+                device_id = message.get("device_id", config.DEVICE_ID)  # Get device_id, fallback to config.DEVICE_ID
                 if chat_id:
                     if status == "enabled":
-                        send_message(chat_id, f"Device {config.DEVICE_ID} enabled", platform)  # Notify enabled
+                        send_message(chat_id, f"Device {device_id} enabled", platform)  # Notify enabled
                     elif status == "disabled":
-                        send_message(chat_id, f"Device {config.DEVICE_ID} disabled", platform)  # Notify disabled
+                        send_message(chat_id, f"Device {device_id} disabled", platform)  # Notify disabled
                     else:
-                        send_message(chat_id, f"Device {config.DEVICE_ID} status: {status}", platform)  # Notify other status
+                        send_message(chat_id, f"Device {device_id} status: {status}", platform)  # Notify other status
 
         channel.basic_consume(queue=config.RABBITMQ_QUEUE, on_message_callback=callback, auto_ack=True)  # Start consuming queue
         logger.info("Started consuming IM Queue...")
