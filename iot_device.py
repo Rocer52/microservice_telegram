@@ -55,7 +55,7 @@ class IoTDevice:
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             logger.info(f"{self.name} ({self.device_type}, {self.device_id}) connected to IOTQueue broker")
-            self.client.subscribe(f"light/{self.device_type}/{self.device_id}/command")  # Subscribe to device-type-specific command topic
+            self.client.subscribe(f"{self.device_type}/light/{self.device_id}/message")  # Subscribe to command topic
         else:
             logger.error(f"{self.name} ({self.device_type}, {self.device_id}) connection failed, return code: {rc}")
 
@@ -66,25 +66,30 @@ class IoTDevice:
     # Callback: Handle received MQTT messages
     def on_message(self, client, userdata, msg):
         topic = msg.topic  # Get message topic
-        payload = json.loads(msg.payload.decode())  # Parse message content
+        payload = msg.payload.decode()  # Decode payload
         logger.info(f"{self.name} ({self.device_type}, {self.device_id}) received message - Topic: {topic}, Payload: {payload}")
 
-        if topic == f"light/{self.device_type}/{self.device_id}/command":  # Handle device-type-specific command topic
-            command = payload.get("command")  # Get command
-            chat_id = payload.get("chat_id")  # Get chat ID
-            platform = payload.get("platform", "telegram")  # Get platform
-            device_id = payload.get("device_id", self.device_id)  # Get device_id from payload
-            if device_id != self.device_id:
-                logger.info(f"Ignoring message for device_id {device_id}, this device is {self.device_id}")
+        if topic == f"{self.device_type}/light/{self.device_id}/message":  # Handle command topic
+            try:
+                payload_dict = json.loads(payload)  # Try to parse as JSON
+                command = payload_dict.get("command")  # Get command
+                chat_id = payload_dict.get("chat_id")  # Get chat ID
+                platform = payload_dict.get("platform", "telegram")  # Get platform
+                device_id = payload_dict.get("device_id", self.device_id)  # Get device_id from payload
+                if device_id != self.device_id:
+                    logger.info(f"Ignoring message for device_id {device_id}, this device is {self.device_id}")
+                    return
+                if command == "on":
+                    self.enable(chat_id, platform)  # Enable device
+                elif command == "off":
+                    self.disable(chat_id, platform)  # Disable device
+                elif command == "get_status":
+                    self.get_status(chat_id, platform)  # Get device status
+                elif command in ["on", "off"]:
+                    self.set_status(command, chat_id, platform)  # Set device status
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse payload as JSON: {e}, payload: {payload}")
                 return
-            if command == "on":
-                self.enable(chat_id, platform)  # Enable device
-            elif command == "off":
-                self.disable(chat_id, platform)  # Disable device
-            elif command == "get_status":
-                self.get_status(chat_id, platform)  # Get device status
-            elif command in ["on", "off"]:
-                self.set_status(command, chat_id, platform)  # Set device status
 
     # Function: Notify device status to IMQueue and MQTT
     def notify_status(self, status: str, chat_id: str = None, platform: str = "telegram"):
@@ -96,7 +101,7 @@ class IoTDevice:
                 body=json.dumps(message)
             )  # Send to IMQueue
             logger.info(f"Sent device status to IM Queue: {message}")
-            self.client.publish(f"light/{self.device_type}/{self.device_id}/status", status)  # Send to device-type-specific status topic
+            self.client.publish(f"{self.device_type}/light/{self.device_id}/status", json.dumps({"status": status}))  # Send JSON status
         except (pika.exceptions.StreamLostError, pika.exceptions.ConnectionClosed) as e:
             logger.warning(f"RabbitMQ connection lost: {e}, attempting to reconnect...")
             self.connect_rabbitmq()  # Reconnect RabbitMQ
@@ -106,12 +111,12 @@ class IoTDevice:
                 body=json.dumps(message)
             )
             logger.info(f"Sent device status to IM Queue after reconnect: {message}")
-            self.client.publish(f"light/{self.device_type}/{self.device_id}/status", status)  # Resend to MQTT topic
+            self.client.publish(f"{self.device_type}/light/{self.device_id}/status", json.dumps({"status": status}))  # Resend JSON status
 
     # Function: Get API base URL based on device type
     def get_api_base_url(self):
         if self.device_type == "raspberry_pi":
-            return f"http://{config.ESP32_API_HOST}:{config.ESP32_API_PORT + 1}"
+            return f"http://{config.ESP32_API_HOST}:{config.RASPBERRY_PI_API_PORT}"
         return f"http://{config.ESP32_API_HOST}:{config.ESP32_API_PORT}"
 
     # Function: Enable device, call device-specific API

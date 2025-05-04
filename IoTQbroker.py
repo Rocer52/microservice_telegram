@@ -27,21 +27,21 @@ class Device:
     # Function: Enable device
     def enable(self, chat_id: str = None, platform: str = "telegram") -> bool:
         return self.message_api.send_message(
-            f"light/{self.device_type}/{self.device_id}/command",
+            f"{self.device_type}/light/{self.device_id}/message",
             {"command": "on", "chat_id": chat_id, "platform": platform, "device_id": self.device_id}
         )
 
     # Function: Disable device
     def disable(self, chat_id: str = None, platform: str = "telegram") -> bool:
         return self.message_api.send_message(
-            f"light/{self.device_type}/{self.device_id}/command",
+            f"{self.device_type}/light/{self.device_id}/message",
             {"command": "off", "chat_id": chat_id, "platform": platform, "device_id": self.device_id}
         )
 
     # Function: Get device status
     def get_status(self, chat_id: str = None, platform: str = "telegram") -> bool:
         return self.message_api.send_message(
-            f"light/{self.device_type}/{self.device_id}/command",
+            f"{self.device_type}/light/{self.device_id}/message",
             {"command": "get_status", "chat_id": chat_id, "platform": platform, "device_id": self.device_id}
         )
 
@@ -142,7 +142,7 @@ def IoTParse_Message(message_text: str, device: Device, chat_id: str, platform: 
     # Match get status command
     elif status_match:
         if target_device.get_status(chat_id, platform):
-            return {"success": True, "action": " spasGetStatus", "device_id": device_id}
+            return {"success": True, "action": "GetStatus", "device_id": device_id}
         else:
             return {"success": False, "message": "Failed to get device status"}
     return {"success": False, "message": "Invalid command"}

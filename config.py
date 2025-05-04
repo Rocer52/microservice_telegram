@@ -17,13 +17,18 @@ DEVICE_ID = os.getenv('DEVICE_ID', 'esp_32_001')  # Default device ID
 # Flask API configurations
 TELEGRAM_API_HOST = os.getenv('TELEGRAM_API_HOST', 'localhost')  # Telegram Flask API host
 TELEGRAM_API_PORT = int(os.getenv('TELEGRAM_API_PORT', 5000))  # Telegram Flask API port
+
 LINE_API_HOST = os.getenv('LINE_API_HOST', 'localhost')  # LINE Flask API host
 LINE_API_PORT = int(os.getenv('LINE_API_PORT', 5001))  # LINE Flask API port
+
 IOT_DEVICE_API_PORT = int(os.getenv('IOT_DEVICE_API_PORT', 5002))  # IoT Device Flask API port
+
 ESP32_API_HOST = os.getenv('ESP32_API_HOST', 'localhost')  # ESP32 Flask API host
 ESP32_API_PORT = int(os.getenv('ESP32_API_PORT', 5003))  # ESP32 Flask API port
-RASPBERRYPI_API_HOST = os.getenv('RASPBERRYPI_API_HOST', 'localhost')  # Raspberry Pi Flask API host
-RASPBERRYPI_API_PORT = int(os.getenv('RASPBERRYPI_API_PORT', 5004))  # Raspberry Pi Flask API port
+
+RASPBERRY_PI_API_PORT = os.getenv('RASPBERRYPI_API_HOST', 'localhost')  # Raspberry Pi Flask API host
+RASPBERRY_PI_API_PORT = int(os.getenv("RASPBERRY_PI_API_PORT", "5004"))
+
 
 # Device types and platforms
 DEVICE_TYPES = ['light', 'fan']  # Supported device types

@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 # Simulate Raspberry Pi device state array
 devices = [
-    {"device_id": "raspberry_pi_001", "state": "off"}  # Default Raspberry Pi device
+    {"device_id": config.DEVICE_ID, "state": "off"}  # Default Raspberry Pi device
 ]
 
 # Helper function: Find device by device_id
@@ -77,4 +77,4 @@ def get_status():
     return {"status": "success", "message": device["state"], "state": device["state"], "device_id": device_id}, 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=config.ESP32_API_PORT + 1)  # Run on a different port to avoid conflict
+    app.run(host="0.0.0.0", port=config.RASPBERRY_PI_API_PORT)  # Use config.RASPBERRY_PI_API_PORT

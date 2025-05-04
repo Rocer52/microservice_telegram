@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 # Simulate ESP32 device state array
 devices = [
-    {"device_id": config.DEVICE_ID, "state": "off"}  # Default device
+    {"device_id": config.DEVICE_ID, "state": "off"}  # Default ESP32 device
 ]
 
 # Helper function: Find device by device_id
@@ -18,7 +18,11 @@ def find_device(device_id: str):
     for device in devices:
         if device["device_id"] == device_id:
             return device
-    return None
+    # If device not found, add it dynamically
+    new_device = {"device_id": device_id, "state": "off"}
+    devices.append(new_device)
+    logger.info(f"Added new ESP32 device: {device_id}")
+    return new_device
 
 # Route: Enable device
 @app.route('/Enable', methods=['GET'])
@@ -28,11 +32,8 @@ def enable():
         return {"status": "error", "message": "Missing device_id parameter"}, 400
 
     device = find_device(device_id)
-    if not device:
-        return {"status": "error", "message": f"Device {device_id} not found"}, 404
-
     device["state"] = "on"
-    logger.info(f"Device {device_id} enabled")
+    logger.info(f"ESP32 device {device_id} enabled")
     return {"status": "success", "message": "Device enabled", "state": device["state"], "device_id": device_id}, 200
 
 # Route: Disable device
@@ -43,11 +44,8 @@ def disable():
         return {"status": "error", "message": "Missing device_id parameter"}, 400
 
     device = find_device(device_id)
-    if not device:
-        return {"status": "error", "message": f"Device {device_id} not found"}, 404
-
     device["state"] = "off"
-    logger.info(f"Device {device_id} disabled")
+    logger.info(f"ESP32 device {device_id} disabled")
     return {"status": "success", "message": "Device disabled", "state": device["state"], "device_id": device_id}, 200
 
 # Route: Set device status
@@ -63,11 +61,8 @@ def set_status():
         return {"status": "error", "message": "Invalid status"}, 400
 
     device = find_device(device_id)
-    if not device:
-        return {"status": "error", "message": f"Device {device_id} not found"}, 404
-
     device["state"] = status
-    logger.info(f"Device {device_id} status set to: {status}")
+    logger.info(f"ESP32 device {device_id} status set to: {status}")
     return {"status": "success", "message": f"Device status set to {status}", "state": device["state"], "device_id": device_id}, 200
 
 # Route: Get device status
@@ -78,11 +73,8 @@ def get_status():
         return {"status": "error", "message": "Missing device_id parameter"}, 400
 
     device = find_device(device_id)
-    if not device:
-        return {"status": "error", "message": f"Device {device_id} not found"}, 404
-
-    logger.info(f"Device {device_id} status: {device['state']}")
+    logger.info(f"ESP32 device {device_id} status: {device['state']}")
     return {"status": "success", "message": device["state"], "state": device["state"], "device_id": device_id}, 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=config.ESP32_API_PORT)  # Run on configured port
+    app.run(host="0.0.0.0", port=config.ESP32_API_PORT)  # Use config.ESP32_API_PORT
