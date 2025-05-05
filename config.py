@@ -21,13 +21,17 @@ TELEGRAM_API_PORT = int(os.getenv('TELEGRAM_API_PORT', 5000))  # Telegram Flask 
 LINE_API_HOST = os.getenv('LINE_API_HOST', 'localhost')  # LINE Flask API host
 LINE_API_PORT = int(os.getenv('LINE_API_PORT', 5001))  # LINE Flask API port
 
-IOT_DEVICE_API_PORT = int(os.getenv('IOT_DEVICE_API_PORT', 5002))  # IoT Device Flask API port
-
+# Add these new port configurations to your config.py:
 ESP32_API_HOST = os.getenv('ESP32_API_HOST', 'localhost')  # ESP32 Flask API host
-ESP32_API_PORT = int(os.getenv('ESP32_API_PORT', 5003))  # ESP32 Flask API port
+ESP32_IOT_DEVICE_PORT = int(os.getenv("ESP32_IOT_DEVICE_PORT", "5002"))  # Port for ESP32 IoT Device service
+RASPBERRY_PI_API_HOST = os.getenv('RASPBERRY_PI_API_HOST', 'localhost')  # Raspberry Pi Flask API host
+RASPBERRY_PI_IOT_DEVICE_PORT = int(os.getenv("RASPBERRY_PI_IOT_DEVICE_PORT", "5003"))  # Port for Raspberry Pi IoT Device service
 
+#這裡是virtual
+ESP32_API_HOST = os.getenv('ESP32_API_HOST', 'localhost')  # ESP32 Flask API host
+ESP32_API_PORT = int(os.getenv('ESP32_API_PORT', 5010))  # ESP32 Flask API port
 RASPBERRY_PI_API_PORT = os.getenv('RASPBERRYPI_API_HOST', 'localhost')  # Raspberry Pi Flask API host
-RASPBERRY_PI_API_PORT = int(os.getenv("RASPBERRY_PI_API_PORT", "5004"))
+RASPBERRY_PI_API_PORT = int(os.getenv("RASPBERRY_PI_API_PORT", 5011))
 
 
 # Device types and platforms
