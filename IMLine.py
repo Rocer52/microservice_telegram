@@ -1,4 +1,5 @@
-from flask import Flask, request
+from flask import Flask, request, send_from_directory
+from flask_swagger_ui import get_swaggerui_blueprint
 import requests
 import json
 import config
@@ -6,7 +7,7 @@ import logging
 import IoTQbroker
 import IMQbroker
 import threading
-import time
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -93,10 +94,10 @@ def webhook():
         # Directly call IoTQbroker to parse message and send to IOTQueue
         device = IoTQbroker.Device("LivingRoomLight", device_id=config.DEVICE_ID, platform="line", chat_id=user_id)
         iot_result = IoTQbroker.IoTParse_Message(message_text, device, user_id, "line")
-        if not iot_result["success"]:
-            send_message(user_id, "Please enter a valid command")
-        else:
-            send_message(user_id, f"Command received: {message_text}")
+        #if not iot_result["success"]:
+        #    send_message(user_id, "Please enter a valid command")
+        #else:
+        #    send_message(user_id, f"Command received: {message_text}")
 
     return {"ok": True}, 200
 
@@ -129,12 +130,36 @@ def send_all_message_route():
     success = send_all_message(message)
     return {"ok": success, "message": "All messages sent" if success else "Some messages failed to send"}, 200 if success else 500
 
+# Swagger UI setup
+SWAGGER_URL = '/swagger'
+API_URL = '/static/openapi.yaml'
+swaggerui_blueprint = get_swaggerui_blueprint(
+    SWAGGER_URL,
+    API_URL,
+    config={
+        'app_name': "IM and IoT Microservices"
+    }
+)
+app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
+
+# Serve the openapi.yaml file
+@app.route('/static/<path:path>')
+def send_swagger(path):
+    return send_from_directory('static', path)
+
+# Main entry point
 if __name__ == "__main__":
-    # Start IMQbroker to consume IMQueue in a thread
-    imqbroker_thread = threading.Thread(target=IMQbroker.consume_im_queue)
-    imqbroker_thread.daemon = True
+    # Ensure the static directory and openapi.yaml exist
+    if not os.path.exists('static'):
+        os.makedirs('static')
+    with open('static/openapi.yaml', 'w') as f:
+        with open('openapi.yaml', 'r') as src:
+            f.write(src.read())
+
+    # Start IMQbroker consumer
+    logger.info("Starting IMQbroker consumer in a separate thread from IMLine.py")
+    imqbroker_thread = threading.Thread(target=IMQbroker.consume_im_queue, daemon=True)
     imqbroker_thread.start()
-    logger.info("IMQbroker started in a separate thread")
 
     # Start Flask service
     app.run(host="0.0.0.0", port=config.LINE_API_PORT)
