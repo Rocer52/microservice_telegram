@@ -66,7 +66,8 @@ class RaspberryPiDevice:
         self.mqtt_client = self.setup_mqtt()
         self.rabbitmq_connection = None
         self.rabbitmq_channel = None
-        self.setup_rabbitmq()
+        self.rabbitmq_ioloop_thread = None
+        self.setup_rabbitmq_async()
 
     def setup_mqtt(self):
         client = mqtt.Client(client_id=f"pi_{self.device_id}")
@@ -76,20 +77,52 @@ class RaspberryPiDevice:
         client.reconnect_delay_set(min_delay=1, max_delay=120)
         return client
 
-    def setup_rabbitmq(self):
+    def setup_rabbitmq_async(self):
         try:
             parameters = pika.ConnectionParameters(
                 host=config.RABBITMQ_HOST,
-                port=config.RABBITMQ_PORT,
-                heartbeat=30,
-                blocked_connection_timeout=60
+                port=config.RABBITMQ_PORT
             )
-            self.rabbitmq_connection = pika.BlockingConnection(parameters)
-            self.rabbitmq_channel = self.rabbitmq_connection.channel()
-            self.rabbitmq_channel.queue_declare(queue=config.RABBITMQ_QUEUE, durable=True)
-            logger.info("RabbitMQ connection established")
+            self.rabbitmq_connection = pika.SelectConnection(
+                parameters,
+                on_open_callback=self.on_rabbitmq_open,
+                on_open_error_callback=self.on_rabbitmq_open_error,
+                on_close_callback=self.on_rabbitmq_close
+            )
+            self.rabbitmq_ioloop_thread = threading.Thread(target=self.rabbitmq_connection.ioloop.start)
+            self.rabbitmq_ioloop_thread.daemon = True
+            self.rabbitmq_ioloop_thread.start()
+            logger.info("RabbitMQ async connection initiated")
         except Exception as e:
-            logger.error(f"Failed to connect to RabbitMQ: {e}")
+            logger.error(f"Failed to initiate RabbitMQ async connection: {e}")
+
+    def on_rabbitmq_open(self, connection):
+        logger.info("RabbitMQ connection opened")
+        self.rabbitmq_channel = connection.channel(on_open_callback=self.on_channel_open)
+
+    def on_channel_open(self, channel):
+        logger.info("RabbitMQ channel opened")
+        self.rabbitmq_channel = channel
+        channel.exchange_declare(exchange="im_exchange", exchange_type="topic", durable=False, callback=self.on_exchange_declared)
+
+    def on_exchange_declared(self, frame):
+        self.rabbitmq_channel.queue_declare(queue=config.RABBITMQ_QUEUE, durable=True, callback=self.on_queue_declared)
+
+    def on_queue_declared(self, frame):
+        self.rabbitmq_channel.queue_bind(queue=config.RABBITMQ_QUEUE, exchange="im_exchange", routing_key="telegram.*.status_update")
+        logger.info("RabbitMQ setup complete")
+
+    def on_rabbitmq_open_error(self, connection, error):
+        logger.error(f"RabbitMQ connection failed: {error}")
+        time.sleep(5)
+        self.setup_rabbitmq_async()
+
+    def on_rabbitmq_close(self, connection, reason):
+        logger.warning(f"RabbitMQ connection closed: {reason}")
+        self.rabbitmq_channel = None
+        self.rabbitmq_connection = None
+        time.sleep(5)
+        self.setup_rabbitmq_async()
 
     def on_mqtt_connect(self, client, userdata, flags, rc):
         if rc == 0:
@@ -126,27 +159,39 @@ class RaspberryPiDevice:
             "bot_token": bot_token
         }
         
-        try:
-            self.rabbitmq_channel.basic_publish(
-                exchange="im_exchange",
-                routing_key=f"{platform}/{chat_id}/status_update",
-                body=json.dumps(message),
-                properties=pika.BasicProperties(delivery_mode=2)
-            )
-            logger.info(f"Status update sent: {message}")
-            
-            # Generate and send signature
-            signature = generate_signature(chat_id)
-            if signature["success"]:
-                signature["username"] = username
-                signature["bot_token"] = bot_token
-                requests.post(
-                    f"http://{config.ESP32_DEVICE_HOST}:{config.ESP32_DEVICE_PORT}/signature",
-                    json=signature,
-                    timeout=3
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if not self.rabbitmq_channel or self.rabbitmq_channel.is_closed:
+                    logger.info(f"RabbitMQ channel closed, reconnecting (attempt {attempt + 1}/{max_retries})...")
+                    self.setup_rabbitmq_async()
+                    time.sleep(2)  # Wait longer for async setup
+                    
+                self.rabbitmq_channel.basic_publish(
+                    exchange="im_exchange",
+                    routing_key=f"{platform}/{chat_id}/status_update",
+                    body=json.dumps(message),
+                    properties=pika.BasicProperties(delivery_mode=2)
                 )
-        except Exception as e:
-            logger.error(f"Failed to send status update: {e}")
+                logger.info(f"Status update sent: {message}")
+                
+                # Generate and send signature
+                signature = generate_signature(chat_id)
+                if signature["success"]:
+                    signature["username"] = username
+                    signature["bot_token"] = bot_token
+                    requests.post(
+                        f"http://{config.ESP32_DEVICE_HOST}:{config.ESP32_DEVICE_PORT}/signature",
+                        json=signature,
+                        timeout=3
+                    )
+                break
+            except (pika.exceptions.StreamLostError, pika.exceptions.ConnectionClosed, pika.exceptions.ChannelClosed, pika.exceptions.ChannelClosedByBroker, ConnectionResetError) as e:
+                logger.error(f"Failed to send status update (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                else:
+                    logger.error("Max retries reached, giving up")
 
     def handle_enable(self, payload):
         chat_id = payload.get("chat_id")
@@ -217,6 +262,14 @@ class RaspberryPiDevice:
         except Exception as e:
             logger.error(f"Failed to start MQTT: {e}")
 
+    def stop(self):
+        if self.rabbitmq_connection and not self.rabbitmq_connection.is_closed:
+            self.rabbitmq_connection.ioloop.add_callback_threadsafe(self.rabbitmq_connection.close)
+            self.rabbitmq_connection.ioloop.stop()
+        if self.rabbitmq_ioloop_thread and self.rabbitmq_ioloop_thread.is_alive():
+            self.rabbitmq_ioloop_thread.join(timeout=5)
+        logger.info("RabbitMQ connection closed")
+
 # Create device instance
 pi_device = RaspberryPiDevice("LivingRoomLight", "raspberrypi_light_001")
 
@@ -284,17 +337,20 @@ def serve_swagger(path):
     return send_from_directory('static', path)
 
 if __name__ == "__main__":
-    # Load private key
-    load_private_key()
-    
-    # Ensure static directory exists
-    if not os.path.exists('static'):
-        os.makedirs('static')
-    
-    # Start MQTT in a separate thread
-    mqtt_thread = threading.Thread(target=pi_device.start_mqtt)
-    mqtt_thread.daemon = True
-    mqtt_thread.start()
-    
-    # Start Flask app
-    app.run(host="0.0.0.0", port=config.RASPBERRY_PI_API_PORT)
+    try:
+        # Load private key
+        load_private_key()
+        
+        # Ensure static directory exists
+        if not os.path.exists('static'):
+            os.makedirs('static')
+        
+        # Start MQTT in a separate thread
+        mqtt_thread = threading.Thread(target=pi_device.start_mqtt)
+        mqtt_thread.daemon = True
+        mqtt_thread.start()
+        
+        # Start Flask app
+        app.run(host="0.0.0.0", port=config.RASPBERRY_PI_API_PORT)
+    finally:
+        pi_device.stop()
