@@ -10,25 +10,38 @@ from IoTQbroker import bindings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Function: Send IM message to a specific chat_id via IMTelegram/IMLine API
-def send_message(chat_id: str, text: str, platform: str = "telegram") -> bool:
+# Track chat_ids that have received Hi, username
+greeted_users = set()
+
+# Function: Send IM message to specific chat_id
+def send_message(chat_id: str, text: str, platform: str = "telegram", user_id: str = None, username: str = None) -> bool:
+    bot_token = config.TELEGRAM_BOT_TOKEN if platform == "telegram" else config.LINE_ACCESS_TOKEN
     if platform == "telegram":
         url = f"http://{config.TELEGRAM_API_HOST}:{config.TELEGRAM_API_PORT}/SendMsg"
-        params = {"chat_id": chat_id, "message": text}
+        params = {
+            "chat_id": chat_id,
+            "message": text,
+            "user_id": user_id,
+            "bot_token": bot_token
+        }
     else:  # line
         url = f"http://{config.LINE_API_HOST}:{config.LINE_API_PORT}/SendMsg"
-        params = {"user_id": chat_id, "message": text}
+        params = {
+            "user_id": chat_id,
+            "message": text,
+            "caller_user_id": username,
+            "bot_token": bot_token
+        }
 
     try:
         response = requests.get(url, params=params, timeout=5)
         if response.status_code == 200 and response.json().get("ok"):
-            logger.info(f"Message sent successfully: platform={platform}, chat_id={chat_id}, text={text}")
+            logger.info(f"Message sent to {platform}: {text}")
             return True
-        else:
-            logger.error(f"Failed to send message: {response.text}")
-            return False
+        logger.error(f"Failed to send message: {response.text}")
+        return False
     except Exception as e:
-        logger.error(f"Error sending message to {chat_id} on {platform}: {e}")
+        logger.error(f"Error sending message: {e}")
         return False
 
 # Function: Consume messages from all platform-specific IMQueues
@@ -59,16 +72,16 @@ def consume_im_queue():
         init_rabbitmq()
 
     try:
-        # Declare a generic queue for all platforms
+        # Declare a common queue for all platforms
         queue_name = "im_queue_all"
         channel.queue_declare(queue=queue_name, durable=True)
-        # Bind queue to all platform topics using wildcard
+        # Bind queue to all platform topics with wildcard
         channel.queue_bind(queue=queue_name, exchange="im_exchange", routing_key="#")
 
         # Set prefetch count for fair dispatching
         channel.basic_qos(prefetch_count=1)
 
-        # Callback: Process received messages
+        # Callback: Handle received messages
         def callback(ch, method, properties, body):
             try:
                 message = json.loads(body)
@@ -99,6 +112,9 @@ def consume_im_queue():
                 # Extract message details
                 status = message.get("device_status")
                 device_id = message.get("device_id", config.DEVICE_ID)
+                user_id = message.get("user_id")
+                username = message.get("username", "User")
+                bot_token = message.get("bot_token")
                 bound_users = bindings.get(device_id, set())
 
                 if not chat_id:
@@ -106,21 +122,28 @@ def consume_im_queue():
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                     return
 
+                # Check if Hi, username has been sent
+                greeting = f"Hi, {username}\n" if chat_id not in greeted_users else ""
+                if greeting:
+                    greeted_users.add(chat_id)
+
                 # Send status update to the user who triggered the command
-                formatted_message = f"Device {device_id} is now {status} by user {chat_id}"
-                success = send_message(chat_id, formatted_message, platform)
+                formatted_message = f"{greeting}Device {device_id} is now {status}, operated by user {username}"
+                success = send_message(chat_id, formatted_message, platform, user_id=user_id, username=username)
                 if not success:
-                    logger.warning(f"Failed to send status update to chat_id={chat_id} on platform={platform}")
+                    logger.warning(f"Failed to send status update to chat_id={chat_id} (platform={platform}, username={username})")
 
                 # Notify other bound users
                 other_bound_users = bound_users - {chat_id}
                 if other_bound_users:
                     logger.info(f"Notifying other bound users: {other_bound_users}")
                     for user in other_bound_users:
-                        other_message = f"Device {device_id} has been {status} by user {chat_id}"
-                        success = send_message(user, other_message, platform)
+                        # Assume other user's username is the same as user_id (simplified, actual mapping needed)
+                        other_username = user  # Further mapping required
+                        other_message = f"Device {device_id} has been {status} by user {username}"
+                        success = send_message(user, other_message, platform, user_id=user_id, username=other_username)
                         if not success:
-                            logger.warning(f"Failed to notify bound user {user} on platform={platform}")
+                            logger.warning(f"Failed to notify bound user chat_id={user} (platform={platform}, username={other_username})")
 
                 ch.basic_ack(delivery_tag=method.delivery_tag)
             except json.JSONDecodeError as e:
@@ -131,11 +154,11 @@ def consume_im_queue():
                 ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
         channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
-        logger.info(f"Started consuming IM Queue for all platforms...")
+        logger.info(f"Started consuming IM queue for all platforms...")
         channel.start_consuming()
 
     except Exception as e:
-        logger.error(f"Error consuming IM Queue for all platforms: {e}")
+        logger.error(f"Error consuming IM queue for all platforms: {e}")
         if connection and not connection.is_closed:
             connection.close()
         time.sleep(5)

@@ -1,13 +1,18 @@
-from flask import Flask, request, send_from_directory
+from flask import Flask, request, send_from_directory, jsonify
 from flask_swagger_ui import get_swaggerui_blueprint
-import requests
+import paho.mqtt.client as mqtt
+import pika
 import json
 import config
 import logging
-import IoTQbroker
-import IMQbroker
 import threading
+import time
 import os
+import base64
+from Crypto.Signature import DSS
+from Crypto.Hash import SHA256
+from Crypto.PublicKey import ECC
+import requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -15,120 +20,254 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Store chat IDs
-chat_ids = set()
+# ECDSA private key
+private_key = None
 
-def add_chat_id(chat_id: str):
-    chat_ids.add(chat_id)
-
-def send_message(chat_id: str, text: str) -> bool:
-    url = f"{config.LINE_API_URL}/push"
-    headers = {"Authorization": f"Bearer {config.LINE_ACCESS_TOKEN}"}
-    payload = {
-        "to": chat_id,
-        "messages": [{"type": "text", "text": text}]
-    }
+def load_private_key():
+    global private_key
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            logger.info(f"Message sent successfully: chat_id={chat_id}, text={text}")
-            return True
-        else:
-            logger.error(f"Failed to send message: {response.text}")
+        if not os.path.exists("ecdsa_private.pem"):
+            logger.error("Private key file not found")
             return False
+        with open("ecdsa_private.pem", "rt") as f:
+            private_key = ECC.import_key(f.read())
+        logger.info("Private key loaded successfully")
+        return True
     except Exception as e:
-        logger.error(f"Error sending message: {e}")
+        logger.error(f"Failed to load private key: {e}")
         return False
 
-def send_group_message(group_id: str, text: str) -> bool:
-    url = f"{config.LINE_API_URL}/push"
-    headers = {"Authorization": f"Bearer {config.LINE_ACCESS_TOKEN}"}
-    payload = {
-        "to": group_id,
-        "messages": [{"type": "text", "text": text}]
-    }
+def generate_signature(chat_id: str):
+    if not private_key:
+        return {"success": False, "error": "No private key"}
+    
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            logger.info(f"Group message sent successfully: group_id={group_id}, text={text}")
-            return True
-        else:
-            logger.error(f"Failed to send group message: {response.text}")
-            return False
+        timestamp = str(int(time.time()))
+        message = f"{chat_id}:{timestamp}".encode()
+        h = SHA256.new(message)
+        signer = DSS.new(private_key, 'fips-186-3', encoding='der')
+        signature = signer.sign(h)
+        return {
+            "success": True,
+            "chat_id": chat_id,
+            "timestamp": timestamp,
+            "signature": base64.b64encode(signature).decode()
+        }
     except Exception as e:
-        logger.error(f"Error sending group message: {e}")
-        return False
+        logger.error(f"Error generating signature: {e}")
+        return {"success": False, "error": str(e)}
 
-def send_all_message(text: str) -> bool:
-    success = True
-    for chat_id in chat_ids:
-        if not send_message(chat_id, text):
-            success = False
-    return success
+class ESP32Device:
+    def __init__(self, name: str, device_id: str):
+        self.name = name
+        self.device_id = device_id
+        self.manufacturer = "esp32"
+        self.device_type = "light" if "light" in device_id else "fan"
+        self.mqtt_client = self.setup_mqtt()
+        self.rabbitmq_connection = None
+        self.rabbitmq_channel = None
+        self.setup_rabbitmq()
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.get_json()
-    if data is None:
-        logger.error("Webhook request could not be parsed as JSON")
-        return {"ok": False, "message": "Invalid JSON"}, 400
+    def setup_mqtt(self):
+        client = mqtt.Client(client_id=f"esp32_{self.device_id}")
+        client.on_connect = self.on_mqtt_connect
+        client.on_message = self.on_mqtt_message
+        client.on_disconnect = self.on_mqtt_disconnect
+        client.reconnect_delay_set(min_delay=1, max_delay=120)
+        return client
 
-    events = data.get("events", [])
-    if not events:
-        logger.warning("No events in webhook request, ignoring")
-        return {"ok": True, "message": "No events in request, ignored"}, 200
+    def setup_rabbitmq(self):
+        try:
+            parameters = pika.ConnectionParameters(
+                host=config.RABBITMQ_HOST,
+                port=config.RABBITMQ_PORT,
+                heartbeat=30,
+                blocked_connection_timeout=60
+            )
+            self.rabbitmq_connection = pika.BlockingConnection(parameters)
+            self.rabbitmq_channel = self.rabbitmq_connection.channel()
+            self.rabbitmq_channel.queue_declare(queue=config.RABBITMQ_QUEUE, durable=True)
+            logger.info("RabbitMQ connection established")
+        except Exception as e:
+            logger.error(f"Failed to connect to RabbitMQ: {e}")
 
-    for event in events:
-        if event.get("type") != "message" or event.get("message", {}).get("type") != "text":
-            continue
-
-        reply_token = event.get("replyToken")
-        user_id = event["source"].get("userId")
-        group_id = event["source"].get("groupId") if event["source"].get("type") in ["group"] else None
-        message_text = event["message"]["text"]
-
-        logger.info(f"Received message: user_id={user_id}, group_id={group_id}, text={message_text}")
-
-        add_chat_id(user_id)
-
-        # Directly call IoTQbroker to parse message and send to IOTQueue
-        device = IoTQbroker.Device("LivingRoomLight", device_id=config.DEVICE_ID, platform="line", chat_id=user_id)
-        iot_result = IoTQbroker.IoTParse_Message(message_text, device, user_id, "line")
-        if not iot_result["success"]:
-            send_message(user_id, "Please enter a valid command")
+    def on_mqtt_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            logger.info(f"Connected to MQTT broker for {self.device_id}")
+            client.subscribe(f"{self.manufacturer}/{self.device_type}/#")
         else:
-            send_message(user_id, f"Command received: {message_text}")
+            logger.error(f"MQTT connection failed with code {rc}")
 
-    return {"ok": True}, 200
+    def on_mqtt_disconnect(self, client, userdata, rc):
+        logger.warning(f"MQTT disconnected, attempting to reconnect...")
 
-@app.route('/SendMsg', methods=['GET'])
-def send_message_route():
-    user_id = request.args.get('user_id')
-    message = request.args.get('message')
-    if not user_id or not message:
-        return {"ok": False, "message": "Missing user_id or message"}, 400
+    def on_mqtt_message(self, client, userdata, msg):
+        try:
+            payload = json.loads(msg.payload.decode())
+            logger.info(f"Received MQTT message: {msg.topic} - {payload}")
 
-    success = send_message(user_id, message)
-    return {"ok": success, "message": "Message sent" if success else "Failed to send message"}, 200 if success else 500
+            if msg.topic.endswith("enable"):
+                self.handle_enable(payload)
+            elif msg.topic.endswith("disable"):
+                self.handle_disable(payload)
+            elif msg.topic.endswith("get_status"):
+                self.handle_get_status(payload)
+                
+        except Exception as e:
+            logger.error(f"Error processing MQTT message: {e}")
 
-@app.route('/SendGroupMessage', methods=['GET'])
-def send_group_message_route():
-    group_id = request.args.get('group_id')
-    message = request.args.get('message')
-    if not group_id or not message:
-        return {"ok": False, "message": "Missing group_id or message"}, 400
+    def notify_status(self, status: str, chat_id: str, platform: str, username: str, bot_token: str):
+        message = {
+            "device_status": status,
+            "device_id": self.device_id,
+            "chat_id": chat_id,
+            "platform": platform,
+            "username": username,
+            "bot_token": bot_token
+        }
+        
+        try:
+            self.rabbitmq_channel.basic_publish(
+                exchange="im_exchange",
+                routing_key=f"{platform}/{chat_id}/status_update",
+                body=json.dumps(message),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+            logger.info(f"Status update sent: {message}")
+            
+            # Generate and send signature
+            signature = generate_signature(chat_id)
+            if signature["success"]:
+                signature["username"] = username
+                signature["bot_token"] = bot_token
+                requests.post(
+                    f"http://{config.ESP32_DEVICE_HOST}:{config.ESP32_DEVICE_PORT}/signature",
+                    json=signature,
+                    timeout=3
+                )
+        except Exception as e:
+            logger.error(f"Failed to send status update: {e}")
 
-    success = send_group_message(group_id, message)
-    return {"ok": success, "message": "Group message sent" if success else "Failed to send group message"}, 200 if success else 500
+    def handle_enable(self, payload):
+        chat_id = payload.get("chat_id")
+        platform = payload.get("platform", "telegram")
+        username = payload.get("username", "User")
+        bot_token = payload.get("bot_token", "")
+        
+        try:
+            response = requests.get(
+                f"http://{config.ESP32_DEVICE_HOST}:{config.ESP32_DEVICE_PORT}/Enable",
+                params={"device_id": self.device_id},
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                self.notify_status("on", chat_id, platform, username, bot_token)
+            else:
+                logger.error(f"Enable request failed: {response.text}")
+        except Exception as e:
+            logger.error(f"Error calling enable API: {e}")
 
-@app.route('/SendAllMessage', methods=['GET'])
-def send_all_message_route():
-    message = request.args.get('message')
-    if not message:
-        return {"ok": False, "message": "Missing message"}, 400
+    def handle_disable(self, payload):
+        chat_id = payload.get("chat_id")
+        platform = payload.get("platform", "telegram")
+        username = payload.get("username", "User")
+        bot_token = payload.get("bot_token", "")
+        
+        try:
+            response = requests.get(
+                f"http://{config.ESP32_DEVICE_HOST}:{config.ESP32_DEVICE_PORT}/Disable",
+                params={"device_id": self.device_id},
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                self.notify_status("off", chat_id, platform, username, bot_token)
+            else:
+                logger.error(f"Disable request failed: {response.text}")
+        except Exception as e:
+            logger.error(f"Error calling disable API: {e}")
 
-    success = send_all_message(message)
-    return {"ok": success, "message": "All messages sent" if success else "Some messages failed to send"}, 200 if success else 500
+    def handle_get_status(self, payload):
+        chat_id = payload.get("chat_id")
+        platform = payload.get("platform", "telegram")
+        username = payload.get("username", "User")
+        bot_token = payload.get("bot_token", "")
+        
+        try:
+            response = requests.get(
+                f"http://{config.ESP32_DEVICE_HOST}:{config.ESP32_DEVICE_PORT}/GetStatus",
+                params={"device_id": self.device_id},
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                status = response.json().get("state", "unknown")
+                self.notify_status(status, chat_id, platform, username, bot_token)
+            else:
+                logger.error(f"GetStatus request failed: {response.text}")
+        except Exception as e:
+            logger.error(f"Error calling GetStatus API: {e}")
+
+    def start_mqtt(self):
+        try:
+            self.mqtt_client.connect(config.IOTQUEUE_HOST, config.IOTQUEUE_PORT)
+            self.mqtt_client.loop_start()
+            logger.info(f"MQTT started for {self.device_id}")
+        except Exception as e:
+            logger.error(f"Failed to start MQTT: {e}")
+
+# Create device instance
+esp32_device = ESP32Device("LivingRoomLight", config.DEVICE_ID)
+
+# Flask routes
+@app.route('/Enable', methods=['GET'])
+def api_enable():
+    device_id = request.args.get('device_id')
+    if not device_id or device_id != esp32_device.device_id:
+        return jsonify({"status": "error", "message": "Invalid device ID"}), 400
+    
+    try:
+        response = requests.get(
+            f"http://{config.ESP32_DEVICE_HOST}:{config.ESP32_DEVICE_PORT}/Enable",
+            params={"device_id": device_id},
+            timeout=5
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/Disable', methods=['GET'])
+def api_disable():
+    device_id = request.args.get('device_id')
+    if not device_id or device_id != esp32_device.device_id:
+        return jsonify({"status": "error", "message": "Invalid device ID"}), 400
+    
+    try:
+        response = requests.get(
+            f"http://{config.ESP32_DEVICE_HOST}:{config.ESP32_DEVICE_PORT}/Disable",
+            params={"device_id": device_id},
+            timeout=5
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/GetStatus', methods=['GET'])
+def api_get_status():
+    device_id = request.args.get('device_id')
+    if not device_id or device_id != esp32_device.device_id:
+        return jsonify({"status": "error", "message": "Invalid device ID"}), 400
+    
+    try:
+        response = requests.get(
+            f"http://{config.ESP32_DEVICE_HOST}:{config.ESP32_DEVICE_PORT}/GetStatus",
+            params={"device_id": device_id},
+            timeout=5
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # Swagger UI setup
 SWAGGER_URL = '/swagger'
@@ -136,30 +275,26 @@ API_URL = '/static/openapi.yaml'
 swaggerui_blueprint = get_swaggerui_blueprint(
     SWAGGER_URL,
     API_URL,
-    config={
-        'app_name': "IM and IoT Microservices"
-    }
+    config={'app_name': "ESP32 IoT Device"}
 )
 app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
 
-# Serve the openapi.yaml file
 @app.route('/static/<path:path>')
-def send_swagger(path):
+def serve_swagger(path):
     return send_from_directory('static', path)
 
-# Main entry point
 if __name__ == "__main__":
-    # Ensure the static directory and openapi.yaml exist
+    # Load private key
+    load_private_key()
+    
+    # Ensure static directory exists
     if not os.path.exists('static'):
         os.makedirs('static')
-    with open('static/openapi.yaml', 'w') as f:
-        with open('openapi.yaml', 'r') as src:
-            f.write(src.read())
-
-    # Start IMQbroker consumer
-    logger.info("Starting IMQbroker consumer in a separate thread from IMLine.py")
-    imqbroker_thread = threading.Thread(target=IMQbroker.consume_im_queue, daemon=True)
-    imqbroker_thread.start()
-
-    # Start Flask service
-    app.run(host="0.0.0.0", port=config.LINE_API_PORT)
+    
+    # Start MQTT in a separate thread
+    mqtt_thread = threading.Thread(target=esp32_device.start_mqtt)
+    mqtt_thread.daemon = True
+    mqtt_thread.start()
+    
+    # Start Flask app
+    app.run(host="0.0.0.0", port=config.ESP32_API_PORT)
