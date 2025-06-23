@@ -4,61 +4,63 @@ import requests
 import logging
 import config
 import time
-from IoTQbroker import bindings
+from IoTQbroker import bindings, Device
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Track chat_ids that have received Hi, username
 greeted_users = set()
 
-# Function: Send IM message to specific chat_id
 def send_message(chat_id: str, text: str, platform: str = "telegram", user_id: str = None, username: str = None) -> bool:
     bot_token = config.TELEGRAM_BOT_TOKEN if platform == "telegram" else config.LINE_ACCESS_TOKEN
-    if platform == "telegram":
-        url = f"http://{config.TELEGRAM_API_HOST}:{config.TELEGRAM_API_PORT}/SendMsg"
-        params = {
-            "chat_id": chat_id,
-            "message": text,
-            "user_id": user_id,
-            "bot_token": bot_token
-        }
-    else:  # line
-        url = f"http://{config.LINE_API_HOST}:{config.LINE_API_PORT}/SendMsg"
-        params = {
-            "user_id": chat_id,
-            "message": text,
-            "caller_user_id": username,
-            "bot_token": bot_token
-        }
+    device = Device("LivingRoomLight", config.DEVICE_ID)  # Assume default device
 
-    try:
-        response = requests.get(url, params=params, timeout=5)
-        if response.status_code == 200 and response.json().get("ok"):
-            logger.info(f"Message sent to {platform}: {text}")
-            return True
-        logger.error(f"Failed to send message: {response.text}")
-        return False
-    except Exception as e:
-        logger.error(f"Error sending message: {e}")
-        return False
+    if chat_id == device.group_id and device.group_members:
+        # If chat_id is a group ID, send message to all group members
+        success = True
+        for member in device.group_members:
+            if platform == "telegram":
+                url = f"http://{config.TELEGRAM_API_HOST}:{config.TELEGRAM_API_PORT}/SendMsg"
+                params = {"chat_id": member, "message": text, "user_id": user_id, "bot_token": bot_token}
+            else:  # line
+                url = f"http://{config.LINE_API_HOST}:{config.LINE_API_PORT}/SendMsg"
+                params = {"user_id": member, "message": text, "caller_user_id": username, "bot_token": bot_token}
+            try:
+                response = requests.get(url, params=params, timeout=5)
+                if response.status_code != 200 or not response.json().get("ok"):
+                    logger.error(f"Failed to send message to {member}: {response.text}")
+                    success = False
+            except Exception as e:
+                logger.error(f"Error sending message to {member}: {e}")
+                success = False
+        return success
+    else:
+        # Single user message
+        if platform == "telegram":
+            url = f"http://{config.TELEGRAM_API_HOST}:{config.TELEGRAM_API_PORT}/SendMsg"
+            params = {"chat_id": chat_id, "message": text, "user_id": user_id, "bot_token": bot_token}
+        else:  # line
+            url = f"http://{config.LINE_API_HOST}:{config.LINE_API_PORT}/SendMsg"
+            params = {"user_id": chat_id, "message": text, "caller_user_id": username, "bot_token": bot_token}
+        try:
+            response = requests.get(url, params=params, timeout=5)
+            if response.status_code == 200 and response.json().get("ok"):
+                logger.info(f"Message sent to {platform}: {text}")
+                return True
+            logger.error(f"Failed to send message: {response.text}")
+            return False
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return False
 
-# Function: Consume messages from all platform-specific IMQueues
 def consume_im_queue():
-    # Global RabbitMQ connection and channel
     connection = None
     channel = None
 
     def init_rabbitmq():
         nonlocal connection, channel
         try:
-            parameters = pika.ConnectionParameters(
-                host=config.RABBITMQ_HOST,
-                port=config.RABBITMQ_PORT,
-                heartbeat=30,
-                blocked_connection_timeout=60
-            )
+            parameters = pika.ConnectionParameters(host=config.RABBITMQ_HOST, port=config.RABBITMQ_PORT, heartbeat=30, blocked_connection_timeout=60)
             connection = pika.BlockingConnection(parameters)
             channel = connection.channel()
             channel.exchange_declare(exchange="im_exchange", exchange_type="topic")
@@ -72,23 +74,17 @@ def consume_im_queue():
         init_rabbitmq()
 
     try:
-        # Declare a common queue for all platforms
         queue_name = "im_queue_all"
         channel.queue_declare(queue=queue_name, durable=True)
-        # Bind queue to all platform topics with wildcard
         channel.queue_bind(queue=queue_name, exchange="im_exchange", routing_key="#")
-
-        # Set prefetch count for fair dispatching
         channel.basic_qos(prefetch_count=1)
 
-        # Callback: Handle received messages
         def callback(ch, method, properties, body):
             try:
                 message = json.loads(body)
-                routing_key = method.routing_key  # e.g., "telegram/7890547742/status_update"
+                routing_key = method.routing_key
                 logger.info(f"Received message from topic {routing_key}: {message}")
 
-                # Parse platform and chat_id from routing_key
                 parts = routing_key.split("/")
                 if len(parts) < 3:
                     logger.error(f"Invalid routing key format: {routing_key}")
@@ -100,7 +96,7 @@ def consume_im_queue():
                 event = parts[2] if len(parts) > 2 else "unknown"
 
                 if event != "status_update":
-                    logger.info(f"Ignoring event {event} (only processing status_update)")
+                    logger.info(f"Ignoring event {event}")
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                     return
 
@@ -109,41 +105,43 @@ def consume_im_queue():
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                     return
 
-                # Extract message details
                 status = message.get("device_status")
                 device_id = message.get("device_id", config.DEVICE_ID)
                 user_id = message.get("user_id")
                 username = message.get("username", "User")
                 bot_token = message.get("bot_token")
-                bound_users = bindings.get(device_id, set())
+                device = Device("LivingRoomLight", device_id=device_id)
 
                 if not chat_id:
                     logger.error(f"No chat_id found in message: {message}")
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                     return
 
-                # Check if Hi, username has been sent
+                # Notify the initiating user
                 greeting = f"Hi, {username}\n" if chat_id not in greeted_users else ""
                 if greeting:
                     greeted_users.add(chat_id)
-
-                # Send status update to the user who triggered the command
                 formatted_message = f"{greeting}Device {device_id} is now {status}, operated by user {username}"
                 success = send_message(chat_id, formatted_message, platform, user_id=user_id, username=username)
                 if not success:
-                    logger.warning(f"Failed to send status update to chat_id={chat_id} (platform={platform}, username={username})")
+                    logger.warning(f"Failed to send status update to chat_id={chat_id}")
 
-                # Notify other bound users
-                other_bound_users = bound_users - {chat_id}
-                if other_bound_users:
-                    logger.info(f"Notifying other bound users: {other_bound_users}")
-                    for user in other_bound_users:
-                        # Assume other user's username is the same as user_id (simplified, actual mapping needed)
-                        other_username = user  # Further mapping required
-                        other_message = f"Device {device_id} has been {status} by user {username}"
-                        success = send_message(user, other_message, platform, user_id=user_id, username=other_username)
-                        if not success:
-                            logger.warning(f"Failed to notify bound user chat_id={user} (platform={platform}, username={other_username})")
+                # Notify all bound users, excluding the initiating user and group members already notified
+                notified_users = {chat_id}
+                if device.group_id and device.group_members:
+                    notified_users.update(device.group_members)
+                    for member in device.group_members:
+                        if member != chat_id:
+                            other_message = f"Device {device_id} has been set to {status} by user {username}"
+                            send_message(member, other_message, platform, user_id=user_id, username=username)
+
+                # Fetch all bound users for the device
+                bound_users = bindings.get(device_id, set())
+                for bound_user in bound_users:
+                    if bound_user not in notified_users:
+                        other_message = f"Device {device_id} has been set to {status} by user {username}"
+                        send_message(bound_user, other_message, platform, user_id=user_id, username=username)
+                        notified_users.add(bound_user)
 
                 ch.basic_ack(delivery_tag=method.delivery_tag)
             except json.JSONDecodeError as e:
@@ -156,7 +154,6 @@ def consume_im_queue():
         channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
         logger.info(f"Started consuming IM queue for all platforms...")
         channel.start_consuming()
-
     except Exception as e:
         logger.error(f"Error consuming IM queue for all platforms: {e}")
         if connection and not connection.is_closed:
