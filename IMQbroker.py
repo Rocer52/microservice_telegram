@@ -1,3 +1,4 @@
+# IMQbroker.py
 import pika
 import json
 import requests
@@ -12,46 +13,40 @@ logger = logging.getLogger(__name__)
 greeted_users = set()
 
 def send_message(chat_id: str, text: str, platform: str = "telegram", user_id: str = None, username: str = None) -> bool:
-    bot_token = config.TELEGRAM_BOT_TOKEN if platform == "telegram" else config.LINE_ACCESS_TOKEN
-    device = Device("LivingRoomLight", config.DEVICE_ID)  # Assume default device
-
-    if chat_id == device.group_id and device.group_members:
-        # If chat_id is a group ID, send message to all group members
-        success = True
-        for member in device.group_members:
-            if platform == "telegram":
-                url = f"http://{config.TELEGRAM_API_HOST}:{config.TELEGRAM_API_PORT}/SendMsg"
-                params = {"chat_id": member, "message": text, "user_id": user_id, "bot_token": bot_token}
-            else:  # line
-                url = f"http://{config.LINE_API_HOST}:{config.LINE_API_PORT}/SendMsg"
-                params = {"user_id": member, "message": text, "caller_user_id": username, "bot_token": bot_token}
-            try:
-                response = requests.get(url, params=params, timeout=5)
-                if response.status_code != 200 or not response.json().get("ok"):
-                    logger.error(f"Failed to send message to {member}: {response.text}")
-                    success = False
-            except Exception as e:
-                logger.error(f"Error sending message to {member}: {e}")
-                success = False
-        return success
-    else:
-        # Single user message
+    """Send message to the appropriate platform based on the platform parameter"""
+    try:
         if platform == "telegram":
             url = f"http://{config.TELEGRAM_API_HOST}:{config.TELEGRAM_API_PORT}/SendMsg"
-            params = {"chat_id": chat_id, "message": text, "user_id": user_id, "bot_token": bot_token}
-        else:  # line
+            params = {
+                "chat_id": chat_id,
+                "message": text,
+                "user_id": user_id,
+                "bot_token": config.TELEGRAM_BOT_TOKEN
+            }
+        elif platform == "line":
             url = f"http://{config.LINE_API_HOST}:{config.LINE_API_PORT}/SendMsg"
-            params = {"user_id": chat_id, "message": text, "caller_user_id": username, "bot_token": bot_token}
-        try:
-            response = requests.get(url, params=params, timeout=5)
-            if response.status_code == 200 and response.json().get("ok"):
-                logger.info(f"Message sent to {platform}: {text}")
-                return True
-            logger.error(f"Failed to send message: {response.text}")
+            params = {
+                "user_id": chat_id,  # LINE uses user_id instead of chat_id
+                "message": text,
+                "caller_user_id": username,
+                "bot_token": config.LINE_ACCESS_TOKEN
+            }
+        else:
+            logger.error(f"Unsupported platform: {platform}")
             return False
-        except Exception as e:
-            logger.error(f"Error sending message: {e}")
+
+        logger.info(f"Sending message to {platform} API: {url}")
+        response = requests.get(url, params=params, timeout=5)
+        
+        if response.status_code == 200 and response.json().get("ok"):
+            logger.info(f"Message sent successfully to {platform}: {text}")
+            return True
+        else:
+            logger.error(f"Failed to send message to {platform}: {response.text}")
             return False
+    except Exception as e:
+        logger.error(f"Error sending message to {platform}: {e}")
+        return False
 
 def consume_im_queue():
     connection = None
@@ -60,7 +55,12 @@ def consume_im_queue():
     def init_rabbitmq():
         nonlocal connection, channel
         try:
-            parameters = pika.ConnectionParameters(host=config.RABBITMQ_HOST, port=config.RABBITMQ_PORT, heartbeat=30, blocked_connection_timeout=60)
+            parameters = pika.ConnectionParameters(
+                host=config.RABBITMQ_HOST, 
+                port=config.RABBITMQ_PORT, 
+                heartbeat=30, 
+                blocked_connection_timeout=60
+            )
             connection = pika.BlockingConnection(parameters)
             channel = connection.channel()
             channel.exchange_declare(exchange="im_exchange", exchange_type="topic")
@@ -85,6 +85,7 @@ def consume_im_queue():
                 routing_key = method.routing_key
                 logger.info(f"Received message from topic {routing_key}: {message}")
 
+                # Parse routing key to get platform and chat_id
                 parts = routing_key.split("/")
                 if len(parts) < 3:
                     logger.error(f"Invalid routing key format: {routing_key}")
@@ -117,14 +118,22 @@ def consume_im_queue():
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                     return
 
+                # Validate platform
+                if platform not in ["telegram", "line"]:
+                    logger.error(f"Invalid platform in routing key: {platform}")
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    return
+
                 # Notify the initiating user
                 greeting = f"Hi, {username}\n" if chat_id not in greeted_users else ""
                 if greeting:
                     greeted_users.add(chat_id)
                 formatted_message = f"{greeting}Device {device_id} is now {status}, operated by user {username}"
+                
+                # Use the platform-specific send_message function
                 success = send_message(chat_id, formatted_message, platform, user_id=user_id, username=username)
                 if not success:
-                    logger.warning(f"Failed to send status update to chat_id={chat_id}")
+                    logger.warning(f"Failed to send status update to chat_id={chat_id} on platform {platform}")
 
                 # Notify all bound users, excluding the initiating user and group members already notified
                 notified_users = {chat_id}

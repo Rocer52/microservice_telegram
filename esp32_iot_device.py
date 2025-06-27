@@ -1,3 +1,4 @@
+# esp32_iot_device.py
 from flask import Flask, request, send_from_directory, jsonify
 from flask_swagger_ui import get_swaggerui_blueprint
 import paho.mqtt.client as mqtt
@@ -20,20 +21,16 @@ except ImportError:
     logging.warning("pycryptodome not installed, signature generation disabled")
 import requests
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),  # 輸出到控制台
-        logging.FileHandler('esp32.log', mode='a')  # 輸出到檔案
+        logging.FileHandler('esp32.log', mode='a')
     ]
 )
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# ECDSA private key
 private_key = None
 
 def load_private_key():
@@ -63,7 +60,7 @@ def generate_signature(chat_id: str):
         message = f"{chat_id}:{timestamp}".encode('utf-8')
         h = SHA256.new(message)
         signer = DSS.new(private_key, 'fips-186-3')
-        signature = signer.sign(h)  # r || s (64 bytes)
+        signature = signer.sign(h)
         signature_b64 = base64.b64encode(signature).decode('utf-8')
         result = {
             "success": True,
@@ -218,22 +215,22 @@ class ESP32Device:
                 logger.error(f"Signature generation failed: {signature['error']}")
                 return
             
-            signature["username"] = username
-            signature["bot_token"] = bot_token
             device_config = config.load_device_config()
-            url = f"http://{device_config['esp32']['host']}:{device_config['esp32']['port']}/signature"
-            logger.info(f"Sending signature to {url}")
-            response = requests.post(url, json=signature, timeout=3)
-            
-            if response.status_code != 200:
-                logger.error(f"Signature verification failed: {response.text}")
-                return
-            
             url = f"http://{device_config['esp32']['host']}:{device_config['esp32']['port']}/Enable"
+            
+            data = {
+                "device_id": self.device_id,
+                "chat_id": chat_id,
+                "timestamp": signature["timestamp"],
+                "signature": signature["signature"],
+                "username": username,
+                "bot_token": bot_token
+            }
+            
             logger.info(f"Sending enable request to {url}")
-            response = requests.get(
+            response = requests.post(
                 url,
-                params={"device_id": self.device_id},
+                json=data,
                 timeout=5
             )
             
@@ -252,12 +249,27 @@ class ESP32Device:
         bot_token = payload.get("bot_token", "")
         
         try:
+            signature = generate_signature(chat_id)
+            if not signature["success"]:
+                logger.error(f"Signature generation failed: {signature['error']}")
+                return
+            
             device_config = config.load_device_config()
             url = f"http://{device_config['esp32']['host']}:{device_config['esp32']['port']}/Disable"
+            
+            data = {
+                "device_id": self.device_id,
+                "chat_id": chat_id,
+                "timestamp": signature["timestamp"],
+                "signature": signature["signature"],
+                "username": username,
+                "bot_token": bot_token
+            }
+            
             logger.info(f"Sending disable request to {url}")
-            response = requests.get(
+            response = requests.post(
                 url,
-                params={"device_id": self.device_id},
+                json=data,
                 timeout=5
             )
             
@@ -276,12 +288,27 @@ class ESP32Device:
         bot_token = payload.get("bot_token", "")
         
         try:
+            signature = generate_signature(chat_id)
+            if not signature["success"]:
+                logger.error(f"Signature generation failed: {signature['error']}")
+                return
+            
             device_config = config.load_device_config()
             url = f"http://{device_config['esp32']['host']}:{device_config['esp32']['port']}/GetStatus"
+            
+            data = {
+                "device_id": self.device_id,
+                "chat_id": chat_id,
+                "timestamp": signature["timestamp"],
+                "signature": signature["signature"],
+                "username": username,
+                "bot_token": bot_token
+            }
+            
             logger.info(f"Sending get_status request to {url}")
-            response = requests.get(
+            response = requests.post(
                 url,
-                params={"device_id": self.device_id},
+                json=data,
                 timeout=5
             )
             

@@ -1,3 +1,4 @@
+# config.py
 import os
 import json
 import logging
@@ -121,7 +122,7 @@ _cached_config = load_device_config(config_file_path)
 start_config_polling(config_file_path)
 
 # LINE and Telegram API configurations
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'default')
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN_HERE')
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 LINE_API_URL = os.getenv('LINE_API_URL', 'https://api.line.me/v2/bot/message')

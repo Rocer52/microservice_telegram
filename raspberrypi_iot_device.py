@@ -1,3 +1,4 @@
+# raspberrypi_iot_device.py
 from flask import Flask, request, send_from_directory, jsonify
 from flask_swagger_ui import get_swaggerui_blueprint
 import paho.mqtt.client as mqtt
@@ -219,22 +220,22 @@ class RaspberryPiDevice:
                 logger.error(f"Signature generation failed: {signature['error']}")
                 return
             
-            signature["username"] = username
-            signature["bot_token"] = bot_token
             device_config = config.load_device_config()
-            url = f"http://{device_config['raspberry_pi']['host']}:{device_config['raspberry_pi']['port']}/signature"
-            logger.info(f"Sending signature to {url}")
-            response = requests.post(url, json=signature, timeout=3)
-            
-            if response.status_code != 200:
-                logger.error(f"Signature verification failed: {response.text}")
-                return
-            
             url = f"http://{device_config['raspberry_pi']['host']}:{device_config['raspberry_pi']['port']}/Enable"
+            
+            data = {
+                "device_id": self.device_id,
+                "chat_id": chat_id,
+                "timestamp": signature["timestamp"],
+                "signature": signature["signature"],
+                "username": username,
+                "bot_token": bot_token
+            }
+            
             logger.info(f"Sending enable request to {url}")
-            response = requests.get(
+            response = requests.post(
                 url,
-                params={"device_id": self.device_id, "chat_id": chat_id, "username": username, "bot_token": bot_token},
+                json=data,
                 timeout=5
             )
             
@@ -258,12 +259,27 @@ class RaspberryPiDevice:
             return
         
         try:
+            signature = generate_signature(chat_id)
+            if not signature["success"]:
+                logger.error(f"Signature generation failed: {signature['error']}")
+                return
+            
             device_config = config.load_device_config()
             url = f"http://{device_config['raspberry_pi']['host']}:{device_config['raspberry_pi']['port']}/Disable"
+            
+            data = {
+                "device_id": self.device_id,
+                "chat_id": chat_id,
+                "timestamp": signature["timestamp"],
+                "signature": signature["signature"],
+                "username": username,
+                "bot_token": bot_token
+            }
+            
             logger.info(f"Sending disable request to {url}")
-            response = requests.get(
+            response = requests.post(
                 url,
-                params={"device_id": self.device_id, "chat_id": chat_id, "username": username, "bot_token": bot_token},
+                json=data,
                 timeout=5
             )
             
@@ -287,12 +303,27 @@ class RaspberryPiDevice:
             return
         
         try:
+            signature = generate_signature(chat_id)
+            if not signature["success"]:
+                logger.error(f"Signature generation failed: {signature['error']}")
+                return
+            
             device_config = config.load_device_config()
             url = f"http://{device_config['raspberry_pi']['host']}:{device_config['raspberry_pi']['port']}/GetStatus"
+            
+            data = {
+                "device_id": self.device_id,
+                "chat_id": chat_id,
+                "timestamp": signature["timestamp"],
+                "signature": signature["signature"],
+                "username": username,
+                "bot_token": bot_token
+            }
+            
             logger.info(f"Sending get_status request to {url}")
-            response = requests.get(
+            response = requests.post(
                 url,
-                params={"device_id": self.device_id, "chat_id": chat_id, "username": username, "bot_token": bot_token},
+                json=data,
                 timeout=5
             )
             
