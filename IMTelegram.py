@@ -172,10 +172,10 @@ if __name__ == "__main__":
             f.write(src.read())
 
     # Start IMQbroker to consume IMQueue in a thread
-    imqbroker_thread = threading.Thread(target=IMQbroker.consume_im_queue)
+    imqbroker_thread = threading.Thread(target=IMQbroker.consume_telegram_queue)
     imqbroker_thread.daemon = True
     imqbroker_thread.start()
-    logger.info("IMQbroker started in a separate thread (Telegram)")
+    logger.info("IMQbroker started for Telegram queue")
 
     # Start Flask service
     app.run(host="0.0.0.0", port=config.TELEGRAM_API_PORT)
