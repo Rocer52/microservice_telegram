@@ -16,7 +16,7 @@ def send_message(chat_id: str, text: str, platform: str = "telegram", user_id: s
     """Send message to the appropriate platform based on the platform parameter"""
     try:
         if platform == "telegram":
-            url = f"http://{config.TELEGRAM_API_HOST}:{config.TELEGRAM_API_PORT}/SendMsg"
+            url = f"http://{config.TELEGRAM_API_HOST}:{config.TELEGRAM_API_PORT}/IMTelegram/SendMsg"
             params = {
                 "chat_id": chat_id,
                 "message": text,
@@ -24,7 +24,7 @@ def send_message(chat_id: str, text: str, platform: str = "telegram", user_id: s
                 "bot_token": config.TELEGRAM_BOT_TOKEN
             }
         elif platform == "line":
-            url = f"http://{config.LINE_API_HOST}:{config.LINE_API_PORT}/SendMsg"
+            url = f"http://{config.LINE_API_HOST}:{config.LINE_API_PORT}/IMLine/SendMsg"
             params = {
                 "user_id": chat_id,
                 "message": text,
@@ -48,12 +48,9 @@ def send_message(chat_id: str, text: str, platform: str = "telegram", user_id: s
         logger.error(f"Error sending message to {platform}: {e}")
         return False
 
-def consume_queue(queue_name: str):
-    connection = None
-    channel = None
-
-    def init_rabbitmq():
-        nonlocal connection, channel
+def init_rabbitmq_connection():
+    """Initialize RabbitMQ connection with retry mechanism"""
+    while True:
         try:
             parameters = pika.ConnectionParameters(
                 host=config.RABBITMQ_HOST, 
@@ -64,14 +61,15 @@ def consume_queue(queue_name: str):
             connection = pika.BlockingConnection(parameters)
             channel = connection.channel()
             logger.info(f"Initialized RabbitMQ connection: host={config.RABBITMQ_HOST}, port={config.RABBITMQ_PORT}")
+            return connection, channel
         except Exception as e:
             logger.error(f"Failed to initialize RabbitMQ connection: {e}")
             time.sleep(5)
-            init_rabbitmq()
 
-    if not connection or connection.is_closed:
-        init_rabbitmq()
-
+def consume_queue(queue_name: str):
+    """Consume messages from RabbitMQ queue"""
+    connection, channel = init_rabbitmq_connection()
+    
     try:
         channel.queue_declare(queue=queue_name, durable=True)
         channel.basic_qos(prefetch_count=1)
@@ -146,6 +144,7 @@ def consume_queue(queue_name: str):
         if connection and not connection.is_closed:
             connection.close()
         time.sleep(5)
+        # Restart consuming
         consume_queue(queue_name)
 
 def consume_line_queue():

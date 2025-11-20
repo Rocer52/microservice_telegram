@@ -1,7 +1,6 @@
 # esp32_iot_device.py
 from flask import Flask, request, send_from_directory, jsonify
 from flask_swagger_ui import get_swaggerui_blueprint
-import paho.mqtt.client as mqtt
 import pika
 import json
 import config
@@ -10,6 +9,7 @@ import threading
 import time
 import os
 import base64
+
 try:
     from Crypto.Signature import DSS
     from Crypto.Hash import SHA256
@@ -82,86 +82,97 @@ class ESP32Device:
         self.device_id = device_id
         self.manufacturer = "esp32"
         self.device_type = "light" if "light" in device_id else "fan"
-        self.mqtt_client = self.setup_mqtt()
         self.rabbitmq_connection = None
         self.rabbitmq_channel = None
-        self.rabbitmq_ioloop_thread = None
-        self.setup_rabbitmq_async()
+        self.rabbitmq_consumer_thread = None
+        self.running = False
+        self.start_rabbitmq()
 
-    def setup_mqtt(self):
-        client = mqtt.Client(client_id=f"esp32_{self.device_id}")
-        client.on_connect = self.on_mqtt_connect
-        client.on_message = self.on_mqtt_message
-        client.on_disconnect = self.on_mqtt_disconnect
-        client.reconnect_delay_set(min_delay=1, max_delay=120)
-        return client
-
-    def setup_rabbitmq_async(self):
+    def setup_rabbitmq_connection(self):
+        # Setup RabbitMQ connection
         try:
             parameters = pika.ConnectionParameters(
                 host=config.RABBITMQ_HOST,
-                port=config.RABBITMQ_PORT
+                port=config.RABBITMQ_PORT,
+                heartbeat=30,
+                blocked_connection_timeout=60
             )
-            self.rabbitmq_connection = pika.SelectConnection(
-                parameters,
-                on_open_callback=self.on_rabbitmq_open,
-                on_open_error_callback=self.on_rabbitmq_open_error,
-                on_close_callback=self.on_rabbitmq_close
-            )
-            self.rabbitmq_ioloop_thread = threading.Thread(target=self.rabbitmq_connection.ioloop.start)
-            self.rabbitmq_ioloop_thread.daemon = True
-            self.rabbitmq_ioloop_thread.start()
-            logger.info("RabbitMQ async connection initiated")
+            self.rabbitmq_connection = pika.BlockingConnection(parameters)
+            self.rabbitmq_channel = self.rabbitmq_connection.channel()
+            logger.info("RabbitMQ BlockingConnection established successfully")
+            return True
         except Exception as e:
-            logger.error(f"Failed to initiate RabbitMQ async connection: {e}")
+            logger.error(f"Failed to establish RabbitMQ BlockingConnection: {e}")
+            return False
 
-    def on_rabbitmq_open(self, connection):
-        self.rabbitmq_channel = connection.channel(on_open_callback=self.on_channel_open)
-
-    def on_channel_open(self, channel):
-        self.rabbitmq_channel = channel
-        logger.info("RabbitMQ channel opened")
-
-    def on_rabbitmq_open_error(self, connection, error):
-        logger.error(f"RabbitMQ connection failed: {error}")
-        time.sleep(5)
-        self.setup_rabbitmq_async()
-
-    def on_rabbitmq_close(self, connection, reason):
-        logger.warning(f"RabbitMQ connection closed: {reason}")
-        self.rabbitmq_channel = None
-        self.rabbitmq_connection = None
-        time.sleep(5)
-        self.setup_rabbitmq_async()
-
-    def on_mqtt_connect(self, client, userdata, flags, rc):
-        if rc == 0:
-            logger.info(f"Connected to MQTT broker for {self.device_id}")
-            client.subscribe(f"{self.manufacturer}/{self.device_type}/#")
-        else:
-            logger.error(f"MQTT connection failed with code {rc}")
-    
-    def on_mqtt_disconnect(self, client, userdata, rc):
-        logger.warning(f"MQTT disconnected, attempting to reconnect...")
-    
-    def on_mqtt_message(self, client, userdata, msg):
+    def on_rabbitmq_message(self, channel, method, properties, body):
+        # Process RabbitMQ message
         try:
-            payload = json.loads(msg.payload.decode('utf-8'))
-            logger.info(f"Received MQTT message: {msg.topic}")
+            payload = json.loads(body.decode('utf-8'))
+            logger.info(f"Received RabbitMQ message: {payload}")
             
-            if msg.topic.endswith("enable"):
+            command = payload.get("command")
+            if command == "on":
                 self.handle_enable(payload)
-            elif msg.topic.endswith("disable"):
+            elif command == "off":
                 self.handle_disable(payload)
-            elif msg.topic.endswith("get_status"):
+            elif command == "get_status":
                 self.handle_get_status(payload)
                 
+            channel.basic_ack(delivery_tag=method.delivery_tag)
         except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in MQTT message: {e}")
+            logger.error(f"Invalid JSON in RabbitMQ message: {e}")
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
         except Exception as e:
-            logger.error(f"Error processing MQTT message: {e}")
+            logger.error(f"Error processing RabbitMQ message: {e}")
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+    def consume_messages(self):
+        # Consume messages from RabbitMQ queue
+        while self.running:
+            try:
+                if not self.rabbitmq_connection or self.rabbitmq_connection.is_closed:
+                    logger.info("RabbitMQ connection closed, reconnecting...")
+                    if not self.setup_rabbitmq_connection():
+                        time.sleep(5)
+                        continue
+
+                queue_name = "iot_esp32_queue"
+                self.rabbitmq_channel.queue_declare(queue=queue_name, durable=True)
+                self.rabbitmq_channel.basic_qos(prefetch_count=1)
+                
+                logger.info(f"Starting to consume messages from {queue_name}")
+                
+                for method, properties, body in self.rabbitmq_channel.consume(
+                    queue_name, inactivity_timeout=1, auto_ack=False):
+                    
+                    if not self.running:
+                        break
+                        
+                    if method is None:
+                        continue
+                        
+                    self.on_rabbitmq_message(self.rabbitmq_channel, method, properties, body)
+                        
+            except (pika.exceptions.ConnectionClosed, 
+                   pika.exceptions.ChannelClosed,
+                   pika.exceptions.StreamLostError) as e:
+                logger.error(f"RabbitMQ connection error: {e}, reconnecting...")
+                time.sleep(5)
+            except Exception as e:
+                logger.error(f"Unexpected error in consume_messages: {e}")
+                time.sleep(5)
+
+    def start_rabbitmq(self):
+        # Start RabbitMQ consumer thread
+        self.running = True
+        self.rabbitmq_consumer_thread = threading.Thread(target=self.consume_messages)
+        self.rabbitmq_consumer_thread.daemon = True
+        self.rabbitmq_consumer_thread.start()
+        logger.info(f"RabbitMQ consumer started for {self.device_id}")
 
     def notify_status(self, status: str, chat_id: str, platform: str, username: str, bot_token: str):
+        # Send status notification to IM system
         message = {
             "device_status": status,
             "device_id": self.device_id,
@@ -174,10 +185,11 @@ class ESP32Device:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                if not self.rabbitmq_channel or self.rabbitmq_channel.is_closed:
-                    logger.info(f"RabbitMQ channel closed, reconnecting (attempt {attempt + 1}/{max_retries})...")
-                    self.setup_rabbitmq_async()
-                    time.sleep(2)
+                if not self.rabbitmq_connection or self.rabbitmq_connection.is_closed:
+                    logger.info(f"RabbitMQ connection closed, reconnecting (attempt {attempt + 1}/{max_retries})...")
+                    if not self.setup_rabbitmq_connection():
+                        time.sleep(2)
+                        continue
                 
                 if platform == "line":
                     queue_name = config.RABBITMQ_LINE_QUEUE
@@ -212,6 +224,11 @@ class ESP32Device:
         platform = payload.get("platform", "telegram")
         username = payload.get("username", "User")
         bot_token = payload.get("bot_token", "")
+        device_id = payload.get("device_id")
+        
+        if device_id != self.device_id:
+            logger.error(f"Invalid device_id in payload: {device_id}, expected {self.device_id}")
+            return
         
         try:
             signature = generate_signature(chat_id)
@@ -220,8 +237,9 @@ class ESP32Device:
                 return
             
             device_config = config.load_device_config()
-            url = f"{device_config['esp32']['url']}/Enable"
+            url = f"{device_config['esp32']['url']}/ESP32/{device_id}/Enable"
             
+            # Convert to GET request and use params to pass data
             data = {
                 "device_id": self.device_id,
                 "chat_id": chat_id,
@@ -231,10 +249,10 @@ class ESP32Device:
                 "bot_token": bot_token
             }
             
-            logger.info(f"Sending enable request to {url}")
-            response = requests.post(
+            logger.info(f"Sending enable GET request to {url}")
+            response = requests.get(
                 url,
-                json=data,
+                params=data, # Use params to pass data as URL query string
                 timeout=5
             )
             
@@ -251,6 +269,11 @@ class ESP32Device:
         platform = payload.get("platform", "telegram")
         username = payload.get("username", "User")
         bot_token = payload.get("bot_token", "")
+        device_id = payload.get("device_id")
+        
+        if device_id != self.device_id:
+            logger.error(f"Invalid device_id in payload: {device_id}, expected {self.device_id}")
+            return
         
         try:
             signature = generate_signature(chat_id)
@@ -259,8 +282,9 @@ class ESP32Device:
                 return
             
             device_config = config.load_device_config()
-            url = f"{device_config['esp32']['url']}/Disable"
+            url = f"{device_config['esp32']['url']}/ESP32/{device_id}/Disable"
             
+            # Convert to GET request and use params to pass data
             data = {
                 "device_id": self.device_id,
                 "chat_id": chat_id,
@@ -270,10 +294,10 @@ class ESP32Device:
                 "bot_token": bot_token
             }
             
-            logger.info(f"Sending disable request to {url}")
-            response = requests.post(
+            logger.info(f"Sending disable GET request to {url}")
+            response = requests.get(
                 url,
-                json=data,
+                params=data, # Use params to pass data as URL query string
                 timeout=5
             )
             
@@ -290,6 +314,11 @@ class ESP32Device:
         platform = payload.get("platform", "telegram")
         username = payload.get("username", "User")
         bot_token = payload.get("bot_token", "")
+        device_id = payload.get("device_id")
+        
+        if device_id != self.device_id:
+            logger.error(f"Invalid device_id in payload: {device_id}, expected {self.device_id}")
+            return
         
         try:
             signature = generate_signature(chat_id)
@@ -298,8 +327,9 @@ class ESP32Device:
                 return
             
             device_config = config.load_device_config()
-            url = f"{device_config['esp32']['url']}/GetStatus"
+            url = f"{device_config['esp32']['url']}/ESP32/{device_id}/GetStatus"
             
+            # Convert to GET request and use params to pass data
             data = {
                 "device_id": self.device_id,
                 "chat_id": chat_id,
@@ -309,10 +339,10 @@ class ESP32Device:
                 "bot_token": bot_token
             }
             
-            logger.info(f"Sending get_status request to {url}")
-            response = requests.post(
+            logger.info(f"Sending get_status GET request to {url}")
+            response = requests.get(
                 url,
-                json=data,
+                params=data, # Use params to pass data as URL query string
                 timeout=5
             )
             
@@ -325,85 +355,143 @@ class ESP32Device:
         except requests.RequestException as e:
             logger.error(f"Error calling GetStatus API: {e}")
 
-    def start_mqtt(self):
-        try:
-            self.mqtt_client.connect(config.IOTQUEUE_HOST, config.IOTQUEUE_PORT)
-            self.mqtt_client.loop_start()
-            logger.info(f"MQTT started for {self.device_id}")
-        except Exception as e:
-            logger.error(f"Failed to start MQTT: {e}")
-
     def stop(self):
+        # Stop RabbitMQ consumer
+        self.running = False
         try:
             if self.rabbitmq_connection and not self.rabbitmq_connection.is_closed:
-                self.rabbitmq_connection.ioloop.add_callback_threadsafe(self.rabbitmq_connection.close)
-                self.rabbitmq_connection.ioloop.stop()
-            if self.rabbitmq_ioloop_thread and self.rabbitmq_ioloop_thread.is_alive():
-                self.rabbitmq_ioloop_thread.join(timeout=5)
+                self.rabbitmq_connection.close()
             logger.info("RabbitMQ connection closed")
         except Exception as e:
             logger.error(f"Error stopping RabbitMQ: {e}")
 
 esp32_device = ESP32Device("LivingRoomLight", config.DEVICE_ID)
 
-@app.route('/Enable', methods=['GET'])
-def api_enable():
-    device_id = request.args.get('device_id')
+@app.route('/ESP32/<device_id>/Enable', methods=['GET', 'POST'])
+def api_enable(device_id):
+    # API Proxy: Forward request to actual device
     if not device_id or device_id != esp32_device.device_id:
         logger.error(f"Invalid device ID: {device_id}")
         return jsonify({"status": "error", "message": "Invalid device ID"}), 400
     
+    if request.method == 'POST':
+        # Note: Keep parsing POST JSON here as this endpoint might be called by other microservices
+        data = request.get_json(silent=True) or {}
+        chat_id = data.get('chat_id', "default")
+        timestamp = data.get('timestamp')
+        signature_b64 = data.get('signature')
+        username = data.get('username', "User")
+        bot_token = data.get('bot_token', "")
+        
+        # Since the device only accepts GET now, we need to convert POST data to GET params
+        params = data
+        request_func = requests.get
+        
+    else: # GET request
+        params = request.args
+        chat_id = params.get('chat_id', "default")
+        timestamp = params.get('timestamp')
+        signature_b64 = params.get('signature')
+        username = params.get('username', "User")
+        bot_token = params.get('bot_token', "")
+        request_func = requests.get
+    
     try:
         device_config = config.load_device_config()
-        url = f"{device_config['esp32']['url']}/Enable"
-        logger.info(f"Sending enable API request to {url}")
-        response = requests.get(
+        url = f"{device_config['esp32']['url']}/ESP32/{device_id}/Enable"
+        logger.info(f"Sending enable API request (GET) to {url}")
+        
+        response = request_func(
             url,
-            params={"device_id": device_id},
+            params=params, # Pass all query string parameters using params
             timeout=5
         )
+            
         return jsonify(response.json()), response.status_code
     except requests.RequestException as e:
         logger.error(f"Error in enable API: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/Disable', methods=['GET'])
-def api_disable():
-    device_id = request.args.get('device_id')
+@app.route('/ESP32/<device_id>/Disable', methods=['GET', 'POST'])
+def api_disable(device_id):
+    # API Proxy: Forward request to actual device
     if not device_id or device_id != esp32_device.device_id:
         logger.error(f"Invalid device ID: {device_id}")
         return jsonify({"status": "error", "message": "Invalid device ID"}), 400
     
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        chat_id = data.get('chat_id', "default")
+        timestamp = data.get('timestamp')
+        signature_b64 = data.get('signature')
+        username = data.get('username', "User")
+        bot_token = data.get('bot_token', "")
+        
+        params = data
+        request_func = requests.get
+        
+    else: # GET request
+        params = request.args
+        chat_id = params.get('chat_id', "default")
+        timestamp = params.get('timestamp')
+        signature_b64 = params.get('signature')
+        username = params.get('username', "User")
+        bot_token = params.get('bot_token', "")
+        request_func = requests.get
+    
     try:
         device_config = config.load_device_config()
-        url = f"{device_config['esp32']['url']}/Disable"
-        logger.info(f"Sending disable API request to {url}")
-        response = requests.get(
+        url = f"{device_config['esp32']['url']}/ESP32/{device_id}/Disable"
+        logger.info(f"Sending disable API request (GET) to {url}")
+        
+        response = request_func(
             url,
-            params={"device_id": device_id},
+            params=params,
             timeout=5
         )
+            
         return jsonify(response.json()), response.status_code
     except requests.RequestException as e:
         logger.error(f"Error in disable API: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/GetStatus', methods=['GET'])
-def api_get_status():
-    device_id = request.args.get('device_id')
+@app.route('/ESP32/<device_id>/GetStatus', methods=['GET', 'POST'])
+def api_get_status(device_id):
+    # API Proxy: Forward request to actual device
     if not device_id or device_id != esp32_device.device_id:
         logger.error(f"Invalid device ID: {device_id}")
         return jsonify({"status": "error", "message": "Invalid device ID"}), 400
     
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        chat_id = data.get('chat_id', "default")
+        timestamp = data.get('timestamp')
+        signature_b64 = data.get('signature')
+        username = data.get('username', "User")
+        bot_token = data.get('bot_token', "")
+        
+        params = data
+        request_func = requests.get
+    else: # GET request
+        params = request.args
+        chat_id = params.get('chat_id', "default")
+        timestamp = params.get('timestamp')
+        signature_b64 = params.get('signature')
+        username = params.get('username', "User")
+        bot_token = params.get('bot_token', "")
+        request_func = requests.get
+    
     try:
         device_config = config.load_device_config()
-        url = f"{device_config['esp32']['url']}/GetStatus"
-        logger.info(f"Sending get_status API request to {url}")
-        response = requests.get(
+        url = f"{device_config['esp32']['url']}/ESP32/{device_id}/GetStatus"
+        logger.info(f"Sending get_status API request (GET) to {url}")
+        
+        response = request_func(
             url,
-            params={"device_id": device_id},
+            params=params,
             timeout=5
         )
+            
         return jsonify(response.json()), response.status_code
     except requests.RequestException as e:
         logger.error(f"Error in get_status API: {e}")
@@ -433,9 +521,6 @@ if __name__ == "__main__":
         load_private_key()
         if not os.path.exists('static'):
             os.makedirs('static')
-        mqtt_thread = threading.Thread(target=esp32_device.start_mqtt)
-        mqtt_thread.daemon = True
-        mqtt_thread.start()
         logger.info(f"Starting Flask app on port {config.ESP32_API_PORT}")
         app.run(host="0.0.0.0", port=config.ESP32_API_PORT, debug=False)
     except KeyboardInterrupt:

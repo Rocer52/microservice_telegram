@@ -1,5 +1,5 @@
 # IMTelegram.py
-from flask import Flask, request, send_from_directory
+from flask import Flask, request, send_from_directory, jsonify
 from flask_swagger_ui import get_swaggerui_blueprint
 import requests
 import json
@@ -10,9 +10,10 @@ import IMQbroker
 import threading
 from threading import Lock
 import os
+import time  # Ensure time is imported for the test APIs
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -49,7 +50,7 @@ def send_message(chat_id: str, text: str, user_id: str = None) -> bool:
         return False
 
 # Route: Handle Telegram Webhook request
-@app.route('/webhook', methods=['POST'])
+@app.route('/IMTelegram/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
     if data is None:
@@ -84,7 +85,7 @@ def webhook():
     return {"ok": True}, 200
 
 # Route: Manually send message to specific user
-@app.route('/SendMsg', methods=['GET'])
+@app.route('/IMTelegram/SendMsg', methods=['GET'])
 def send_message_route():
     chat_id = request.args.get('chat_id')
     message = request.args.get('message')
@@ -98,7 +99,7 @@ def send_message_route():
     return {"ok": success, "message": "Message sent" if success else "Failed to send message"}, 200 if success else 500
 
 # Route: Send message to all users bound to a specific device
-@app.route('/SendGroupMessage', methods=['GET'])
+@app.route('/IMTelegram/SendGroupMessage', methods=['GET'])
 def send_group_message_route():
     device_id = request.args.get('device_id')
     message = request.args.get('message')
@@ -141,7 +142,7 @@ def send_group_message_route():
     return {"ok": success, "message": "Group message sent" if success else "Some messages failed to send"}, 200 if success else 500
 
 # Route: Send message to all users who have bound any device
-@app.route('/SendAllMessage', methods=['GET'])
+@app.route('/IMTelegram/SendAllMessage', methods=['GET'])
 def send_all_message_route():
     message = request.args.get('message')
     user_id = request.args.get('user_id')
@@ -185,8 +186,8 @@ def send_all_message_route():
     return {"ok": success, "message": "All messages sent" if success else "Some messages failed to send"}, 200 if success else 500
 
 # Swagger UI setup
-SWAGGER_URL = '/swagger'
-API_URL = '/static/openapi.yaml'
+SWAGGER_URL = '/IMTelegram/swagger'
+API_URL = '/IMTelegram/static/openapi.yaml'
 swaggerui_blueprint = get_swaggerui_blueprint(
     SWAGGER_URL,
     API_URL,
@@ -197,7 +198,7 @@ swaggerui_blueprint = get_swaggerui_blueprint(
 app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
 
 # Serve openapi.yaml file
-@app.route('/static/<path:path>')
+@app.route('/IMTelegram/static/<path:path>')
 def send_swagger(path):
     return send_from_directory('static', path)
 

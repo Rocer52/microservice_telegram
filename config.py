@@ -25,9 +25,12 @@ def load_device_config(file_path=None):
     Returns:
         dict: Device configuration with ESP32 and Raspberry Pi URL or host/port.
     """
+
     global _last_modified, _cached_config
-    if not file_path:
-        file_path = os.path.normpath(os.path.expanduser("~/Desktop/device_config.json"))
+    if os.path.exists("/app/data/device_config.json"):
+        file_path = "/app/data/device_config.json"  # Used inside the Pod
+    else:
+        file_path = os.path.normpath(os.path.expanduser("~/Desktop/device_config.json"))  # Local desktop
     
     default_config = {
         "esp32": {
